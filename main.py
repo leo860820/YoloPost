@@ -14,7 +14,7 @@ import json
 # from keras.utils import to_categorical
 # from keras.models import load_model
 model = YOLO("yolov8n-pose.pt")
-my_model = load_model('knn_model.pkl')
+my_model = joblib.load('knn_model.pkl')
 my_scaler = joblib.load('knn_scaler.pkl')
 path = "./fall.mp4"
 cap = cv2.VideoCapture(path)
