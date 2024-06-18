@@ -6,15 +6,15 @@ from datetime import datetime, timedelta
 import os
 import requests
 import json
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from keras.models import Sequential
-from keras.layers import Dense, Activation
-from keras.optimizers import Adam
-from keras.utils import to_categorical
-from keras.models import load_model
+# from sklearn.model_selection import train_test_split
+# from sklearn.preprocessing import StandardScaler
+# from keras.models import Sequential
+# from keras.layers import Dense, Activation
+# from keras.optimizers import Adam
+# from keras.utils import to_categorical
+# from keras.models import load_model
 model = YOLO("yolov8n-pose.pt")
-my_model = load_model('knn_model.pk1')
+my_model = load_model('knn_model.pkl')
 my_scaler = joblib.load('knn_scaler.pkl')
 path = "./fall.mp4"
 cap = cv2.VideoCapture(path)
