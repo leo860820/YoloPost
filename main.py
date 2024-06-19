@@ -6,126 +6,139 @@ from datetime import datetime, timedelta
 import os
 import requests
 import json
-# from sklearn.model_selection import train_test_split
-# from sklearn.preprocessing import StandardScaler
-# from keras.models import Sequential
-# from keras.layers import Dense, Activation
-# from keras.optimizers import Adam
-# from keras.utils import to_categorical
-# from keras.models import load_model
-model = YOLO("yolov8n-pose.pt")
-my_model = joblib.load('knn_model.pkl')
-my_scaler = joblib.load('knn_scaler.pkl')
-path = "./fall.mp4"
-cap = cv2.VideoCapture(path)
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from keras.models import Sequential
+from keras.layers import Dense, Activation
+from keras.optimizers import Adam
+from keras.utils import to_categorical
+from keras.models import load_model
+import time
+from flask import Flask, Response, render_template
+from flask_socketio import SocketIO, emit
+import requests
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'secret!'
+socketio = SocketIO(app)
+
+# Initialize models and resources
+model = None
+knn_model = None
+knn_scaler = None
+video_running = False
 # LINE Notify token
-token = 'UU7Ig7LUNtddRq0q3GROs2X0X72957PEVVw1qacyfEd'
-notice_time = datetime(1970, 1, 1) 
-# URL of the server endpoint
-url = "https://196.168.24.94:8081/api/pictures"
-# 傳送資料至伺服器
-def send_image_with_data(url, image_path, current_time, data):
-    keypoints = data.flatten()
-    new_list = []
-    current_date = current_time.isoformat()
-    for i in range(0, len(keypoints) - 1, 2):
-        new_list.append(keypoints[i:i + 2].tolist())
-    data = {
-            "current_date": current_date , # Add the current date to the data
-            "keypoints": new_list
-        }
-    json_data = json.dumps(data)
-    headers = {
-            "Content-Type": "multipart/form-data"
-        }
-    with open(image_path, 'rb') as image_file:
-            # Create the payload with the image and JSON data
-            files = {
-                'image': image_file,
-                'data': ('data', json_data, 'application/json'),
-            }
-            response = requests.post(url, files=files, headers=headers)
-# 加工資料取得關鍵點座標
+token = 'SOZLBqxtLUQ8X60AKpkRq5D2jmiFz2NUW2uJX4fPbQZ'
+
+# Server endpoint URL
+server_url = 'http://192.168.24.94:8081/api/pictures'
+# Load models
+def load_models():
+    global model, knn_model, knn_scaler
+    model = YOLO("yolov8n-pose.pt")
+    knn_model = joblib.load('knn_model.pkl')
+    knn_scaler = joblib.load('knn_scaler.pkl')
+
+# Process YOLO results
 def process_image(results):
     r = results[0]
     combined_results = []
     for i in range(len(r.boxes)):
         box_results = []
-        for  j  in range(17):
+        for j in range(17):
             x, y = r.keypoints.xyn[i][j].numpy()
             box_results.extend([x, y])
-            # confidence = r.keypoints.conf[i][j].item()  # Convert tensor to float
         combined_results.append(box_results)
     return combined_results
-# line傳送訊息
-def send_line_notify(token, image_path=None):
-    # Message to send
-    message = '有人跌倒了'
 
-    # HTTP headers and data
-    headers = { "Authorization": "Bearer " + token }
-    data = { 'message': message }
-    
-    # Send the POST request
+# Send fall event to server and upload image
+def send_fall_event_to_server(timestamp, kp, image_path=None):
+    data = {
+        'createdAt': timestamp,
+        'points': kp.tolist()
+    }
+    files = None
     if image_path:
-        # Open the image file in binary mode
+        files = {'image': open(image_path, 'rb')}
+    headers = {'Content-Type': 'application/json'}
+    response = requests.post(server_url,
+                             data=json.dumps(data),
+                             headers=headers,
+                             files=files)
+    if response.status_code == 200:
+        print(f'事件成功发送: {timestamp}')
+    else:
+        print(f'事件发送失败: {response.status_code}, {response.text}')
+# Send LINE notification
+def send_line_notify(token, image_path=None):
+    message = '有人跌倒了'
+    headers = {"Authorization": "Bearer " + token}
+    data = {'message': message}
+    if image_path:
         with open(image_path, 'rb') as image_file:
             image_data = {'imageFile': image_file}
             response = requests.post("https://notify-api.line.me/api/notify", headers=headers, data=data, files=image_data)
     else:
         response = requests.post("https://notify-api.line.me/api/notify", headers=headers, data=data)
+# Video streaming function
+def video_stream():
+    notice_time = datetime(1970, 1, 1) 
+    load_models()
+    cap = cv2.VideoCapture("./fall.mp4")  # Change to your video file path
+    while video_running:
+        success, frame = cap.read()
+        if not success:
+            break
+        else:
+            current_time = datetime.now()
+            results = model.track(frame, conf=0.7)
+            r = results[0]
+            if len(results[0].boxes) >= 1:
+                data = np.array(process_image(results))
+                data = knn_scaler.transform(data)
+                y_pred = knn_model.predict(data)
+                kp = data.reshape(-1, 2)
+                if y_pred[0] == 2:
+                    fall_current_time = current_time
+                    folder_name = 'Fall_img'
+                    os.makedirs(folder_name, exist_ok=True)
+                    time_text = current_time.strftime("%Y-%m-%dT%H:%M:%S")
+                    image_filename = current_time.strftime("%Y-%m-%d_%H%M%S_fall.jpg")
+                    cv2.imwrite(os.path.join(folder_name, image_filename), frame)
+                    send_fall_event_to_server(time_text, kp)
+                    #通知line，並將圖片送出
+                    time_difference = notice_time - current_time
+                    if notice_time == datetime(1970, 1, 1) or time_difference <= timedelta(seconds=1):
+                        image_path = "./Fall_img/"+fall_current_time.strftime("%Y-%m-%d_%H%M%S_fall.jpg")
+                        send_line_notify(token, image_path=image_path)
+                        notice_time = current_time + timedelta(seconds=1)
+                        print("sent2line")
+            
+            # Encode frame as JPEG
+            ret, buffer = cv2.imencode('.jpg', frame)
+            frame_bytes = buffer.tobytes()
+            
+            # Emit frame to clients via socketio
+            socketio.emit('video_frame', {'image': frame_bytes})
 
-    # Print the response
-    print(response.status_code)
-    print(response.text)
-# 開始影片偵測
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
-    current_time = datetime.now()
-    # Perform pose detection
-    results = model.track(frame, conf = 0.7) #偵測影片中人體關節點.track 可以將偵測到的人加上id
-    annotated_frame = results[0].plot() #.plot 將關鍵點畫到影片上
-    r = results[0] # r = 輸出結果 
-    # #印出 所有關鍵點的座標位置
-    # print(r.keypoints.xyn.numpy().reshape(-1, 2)) 
-    # #印出 所有關鍵點的信心值
-    # print(r.keypoints.conf.numpy()) 
-    #將所有關鍵點的位置與信心值丟入knn/svm/random forest/mlp 模型進行預測(0:沒跌倒/1:失衡/2:跌倒)
-    if len(results[0].boxes) >= 1:
-        data = np.array(process_image(results)) #  將資料轉成2d numpy array
-        data = my_scaler.transform(data)
-        y_pred = my_model.predict(data)
-        print(y_pred)
-        predicted_class = np.argmax(y_pred[0])
-        if predicted_class == 2:
-            fall_current_time = current_time
-            folder_name = 'Fall_img'
-            os.makedirs(folder_name, exist_ok=True)
-            time_text = fall_current_time.strftime("%Y-%m-%d %H:%M:%S")
-            cv2.imwrite(os.path.join(folder_name, fall_current_time.strftime("%Y-%m-%d_%H%M%S_fall.jpg")), frame)
-            print("output save")
-            # 將資料傳送至伺服器
-            # image_path = "./Fall_img/"+fall_current_time.strftime("%Y-%m-%d_%H%M%S_fall.jpg")
-            # send_image_with_data(url, image_path, current_time, data)
-            #通知line，並將圖片送出
-            time_difference = notice_time - current_time
-            if notice_time == datetime(1970, 1, 1) or time_difference <= timedelta(seconds=1):
-                image_path = "./Fall_img/"+fall_current_time.strftime("%Y-%m-%d_%H%M%S_fall.jpg")
-                send_line_notify(token, image_path=image_path)
-                notice_time = current_time + timedelta(seconds=1)
+    cap.release()
 
+@app.route('/')
+def index():
+    return render_template('index.html')
 
-    # 存進database
+@app.route('/start')
+def start_video():
+    global video_running
+    if not video_running:
+        video_running = True
+        socketio.start_background_task(target=video_stream)
+    return 'Video stream started'
 
+@app.route('/stop')
+def stop_video():
+    global video_running
+    video_running = False
+    return 'Video stream stopped'
 
-
-    
-    cv2.imshow('YOLOv8 Pose Detection', annotated_frame)
-    if cv2.waitKey(1) & 0xFF == 27:
-        break
-
-
-cap.release()
-cv2.destroyAllWindows()
+if __name__ == '__main__':
+    socketio.run(app, host='192.168.24.152', port=5000)
